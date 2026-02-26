@@ -97,7 +97,6 @@ def build_scheduler(
         factor=factor,
         patience=patience,
         min_lr=min_lr,
-        verbose=True,
     )
 
 
