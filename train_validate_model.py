@@ -173,14 +173,17 @@ def validate(
     max_gen_len: int = 128,
     compute_functional: bool = True,
     functional_mse_threshold: float = 100.0,
+    use_beam: bool = False,
 ) -> Dict[str, float]:
     """Validate the model on the full validation set.
 
     Two passes are made:
       1. **Batched teacher-forced pass** — computes validation loss efficiently
          using the same forward path as training.
-      2. **Sample-by-sample beam-search pass** — generates predictions
-         autoregressively and computes all sequence-level and symbolic metrics.
+      2. **Generation pass** — produces predictions and computes sequence-level
+         and symbolic metrics.  By default uses fast batched greedy decoding
+         (``use_beam=False``).  Pass ``use_beam=True`` to use per-sample beam
+         search instead (slower but higher quality).
 
     Parameters
     ----------
@@ -189,11 +192,13 @@ def validate(
     tokenizer                : DualBPETokenizer (already fitted)
     device                   : evaluation device
     criterion                : loss function (same as training, has ignore_index)
-    beam_width               : beam width for generation (1 = greedy)
+    beam_width               : beam width used when ``use_beam=True`` (ignored otherwise)
     max_gen_len              : maximum tokens to generate per sample
     compute_functional       : whether to run symbolic / numerical metrics
                                (slower; disable for quick checks)
     functional_mse_threshold : passed through to batch_function_closeness
+    use_beam                 : if True, use per-sample beam search (slow);
+                               if False (default), use fast batched greedy decoding
 
     Returns
     -------
@@ -239,7 +244,12 @@ def validate(
     val_loss = total_loss / max(total_samples, 1)
 
     # ------------------------------------------------------------------
-    # Pass 2 — beam-search generation, metric accumulation
+    # Pass 2 — generation + metric accumulation
+    #
+    # Fast path (default): batched greedy decoding via model.generate_batch()
+    #   — one encoder call per batch instead of one per sample.
+    # Slow path (use_beam=True): per-sample beam search via model.generate()
+    #   — higher quality but ~beam_width× slower; run infrequently.
     # ------------------------------------------------------------------
     all_pred_ids: List[List[int]] = []
     all_tgt_ids:  List[List[int]] = []
@@ -247,28 +257,31 @@ def validate(
     tgt_strings:  List[str] = []
 
     with torch.no_grad():
-        for src, tgt, src_lens, tgt_lens in val_loader:
+        for src, tgt, _src_lens, _tgt_lens in val_loader:
             src = src.to(device)
             tgt = tgt.to(device)
             B   = src.shape[0]
 
-            for i in range(B):
-                src_single = src[i : i + 1]           # (1, src_len)
+            if use_beam:
+                # Per-sample beam search (slow; use every N epochs only)
+                batch_preds: List[Tuple[List[int], str]] = []
+                for i in range(B):
+                    pred_ids, pred_str = model.generate(
+                        src[i : i + 1],
+                        tokenizer,
+                        max_len=max_gen_len,
+                        beam_width=beam_width,
+                    )
+                    batch_preds.append((pred_ids, pred_str))
+            else:
+                # Batched greedy decoding (fast; one encoder call per batch)
+                batch_preds = model.generate_batch(src, tokenizer, max_len=max_gen_len)
 
-                # Generate with beam search
-                pred_ids, pred_str = model.generate(
-                    src_single,
-                    tokenizer,
-                    max_len=max_gen_len,
-                    beam_width=beam_width,
-                )
-
+            for i, (pred_ids, pred_str) in enumerate(batch_preds):
                 # Ground truth: strip <SOS> and <EOS> from tgt[i]
                 tgt_seq = tgt[i].tolist()
-                # Remove leading <SOS>
                 if tgt_seq and tgt_seq[0] == out_tok.sos_id:
                     tgt_seq = tgt_seq[1:]
-                # Remove trailing <EOS> and <PAD>
                 tgt_ids_clean = []
                 for tid in tgt_seq:
                     if tid == eos_id:
@@ -372,11 +385,17 @@ def validate(
 # 4. PRETTY PRINT METRICS
 # ============================================================
 
-def print_metrics(epoch: int, train_loss: float, val_metrics: Dict[str, float]) -> None:
+def print_metrics(
+    epoch: int,
+    train_loss: float,
+    val_metrics: Dict[str, float],
+    use_beam: bool = False,
+) -> None:
     """Print a nicely formatted summary for one epoch."""
     sep = "─" * 65
+    decode_tag = "beam" if use_beam else "greedy"
     print(sep)
-    print(f"  Epoch {epoch:>4d}")
+    print(f"  Epoch {epoch:>4d}  [{decode_tag} decode]")
     print(sep)
     print(f"  {'Train loss':<28s}: {train_loss:.6f}")
     print(f"  {'Val loss':<28s}: {val_metrics['val_loss']:.6f}")

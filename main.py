@@ -71,6 +71,7 @@ SCHEDULER_MIN_LR   = 1e-6
 BEAM_WIDTH            = 3
 MAX_GEN_LEN           = 128
 COMPUTE_FUNCTIONAL    = True     # set False to skip sympy / numerical metrics
+BEAM_VALIDATE_EVERY   = 10      # run beam-search validation every N epochs (0 = never)
 
 # --- Best-model selection criterion ---
 # Options: "val_loss" (lower is better) or any metric where HIGHER is better:
@@ -218,6 +219,7 @@ def main() -> None:
 
         # --- Validate every VALIDATE_AFTER_EPOCH epochs ---
         if epoch % VALIDATE_AFTER_EPOCH == 0:
+            use_beam = BEAM_VALIDATE_EVERY > 0 and (epoch % BEAM_VALIDATE_EVERY == 0)
             val_metrics = validate(
                 model,
                 val_loader,
@@ -227,10 +229,11 @@ def main() -> None:
                 beam_width         = BEAM_WIDTH,
                 max_gen_len        = MAX_GEN_LEN,
                 compute_functional = COMPUTE_FUNCTIONAL,
+                use_beam           = use_beam,
             )
 
             print()  # newline after train line
-            print_metrics(epoch, train_loss, val_metrics)
+            print_metrics(epoch, train_loss, val_metrics, use_beam=use_beam)
 
             # --- LR scheduler step (on val_loss) ---
             scheduler.step(val_metrics["val_loss"])

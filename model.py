@@ -126,6 +126,64 @@ class Seq2SeqLSTM(nn.Module):
         return torch.cat(all_logits, dim=1)                    # (B, tgt_len-1, V_out)
 
     # -----------------------------------------------------------------------
+    # generate_batch — batched greedy decoding (fast validation path)
+    # -----------------------------------------------------------------------
+    @torch.no_grad()
+    def generate_batch(
+        self,
+        src: torch.Tensor,
+        tokenizer,
+        max_len: int = 128,
+    ) -> List[Tuple[List[int], str]]:
+        """Greedy decode a full batch in one pass.
+
+        Runs the encoder once for the entire batch and steps the decoder
+        in parallel, which is far faster than calling generate() per sample.
+
+        Args:
+            src       : (B, src_len) — batch of source sequences
+            tokenizer : DualBPETokenizer (already fitted)
+            max_len   : maximum tokens to generate per sequence
+
+        Returns:
+            List of (token_ids, decoded_string) — one entry per sample.
+        """
+        out_tok = tokenizer.output_tokenizer
+        sos_id  = out_tok.vocab["<SOS>"]
+        eos_id  = out_tok.vocab["<EOS>"]
+        pad_id  = out_tok.pad_id
+
+        B      = src.shape[0]
+        device = src.device
+
+        hidden, cell = self.encoder(src)
+
+        token    = torch.full((B,), sos_id, dtype=torch.long, device=device)
+        outputs  = torch.full((B, max_len), pad_id, dtype=torch.long, device=device)
+        finished = torch.zeros(B, dtype=torch.bool, device=device)
+
+        for t in range(max_len):
+            logits, hidden, cell = self.decoder(token, hidden, cell)
+            next_ids = logits.argmax(dim=-1)                    # (B,)
+            next_ids = next_ids.masked_fill(finished, pad_id)   # freeze done seqs
+            outputs[:, t] = next_ids
+            finished = finished | (next_ids == eos_id)
+            token = next_ids
+            if finished.all():
+                break
+
+        results: List[Tuple[List[int], str]] = []
+        for i in range(B):
+            ids: List[int] = []
+            for tid in outputs[i].tolist():
+                if tid == eos_id:
+                    break
+                if tid != pad_id:
+                    ids.append(tid)
+            results.append((ids, out_tok.decode(ids)))
+        return results
+
+    # -----------------------------------------------------------------------
     # generate — autoregressive inference (greedy or beam search)
     # -----------------------------------------------------------------------
     @torch.no_grad()
