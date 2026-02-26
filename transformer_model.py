@@ -97,7 +97,7 @@ class Seq2SeqTransformer(nn.Module):
         encoder_layer = nn.TransformerEncoderLayer(
             d_model, nhead, dim_feedforward, dropout, batch_first=True
         )
-        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_encoder_layers)
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_encoder_layers, enable_nested_tensor=False)
 
         # Transformer decoder
         decoder_layer = nn.TransformerDecoderLayer(
@@ -124,9 +124,8 @@ class Seq2SeqTransformer(nn.Module):
     # -----------------------------------------------------------------------
     @staticmethod
     def _causal_mask(sz: int, device: torch.device) -> torch.Tensor:
-        """Upper-triangular mask that prevents attending to future positions."""
-        mask = torch.triu(torch.ones(sz, sz, device=device), diagonal=1)
-        return mask.masked_fill(mask == 1, float("-inf"))
+        """Upper-triangular bool mask that prevents attending to future positions."""
+        return torch.triu(torch.ones(sz, sz, dtype=torch.bool, device=device), diagonal=1)
 
     def _encode(
         self, src: torch.Tensor
