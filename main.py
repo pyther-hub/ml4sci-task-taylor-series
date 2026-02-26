@@ -22,7 +22,8 @@ import torch
 from torch.utils.data import DataLoader, Subset
 
 from dataset import DualBPETokenizer, TaylorDataset
-from model import Seq2SeqLSTM
+from lstm_model import Seq2SeqLSTM
+from transformer_model import Seq2SeqTransformer
 from train_validate_model import (
     build_criterion,
     build_optimizer,
@@ -33,8 +34,12 @@ from train_validate_model import (
 )
 
 # ============================================================
-# CONFIG  — edit everything here; do not change code below
+# CONFIG  — data loading & model architecture
+# (edit everything here; do not change code below)
 # ============================================================
+
+# --- Model selection ---
+MODEL_TYPE = "lstm"    # "lstm" or "transformer"
 
 # --- Paths ---
 DATASET_JSON_PATH   = "taylor_dataset_sample.json"   # single JSON file
@@ -49,38 +54,14 @@ RANDOM_SEED = 42       # for reproducible splits
 # --- Tokenizer ---
 NUM_MERGES = 200       # BPE merge operations per side
 
-# --- Model architecture ---
-EMBEDDING_DIM = 256
-HIDDEN_DIM    = 512
-NUM_LAYERS    = 2
+# --- Model architecture (shared) ---
+EMBEDDING_DIM = 256    # LSTM: embedding dim;  Transformer: d_model
+HIDDEN_DIM    = 512    # LSTM: hidden dim;     Transformer: dim_feedforward
+NUM_LAYERS    = 2      # LSTM: num LSTM layers; Transformer: encoder & decoder layers
 DROPOUT       = 0.3
 
-# --- Training ---
-BATCH_SIZE           = 32
-NUM_EPOCHS           = 50
-LEARNING_RATE        = 1e-3
-CLIP_GRAD            = 1.0       # max gradient norm (0 → disabled)
-VALIDATE_AFTER_EPOCH = 1         # run validation every N epochs
-
-# --- LR scheduler (ReduceLROnPlateau) ---
-SCHEDULER_FACTOR   = 0.5
-SCHEDULER_PATIENCE = 3
-SCHEDULER_MIN_LR   = 1e-6
-
-# --- Validation / generation ---
-BEAM_WIDTH            = 3
-MAX_GEN_LEN           = 128
-COMPUTE_FUNCTIONAL    = True     # set False to skip sympy / numerical metrics
-BEAM_VALIDATE_EVERY   = 10      # run beam-search validation every N epochs (0 = never)
-
-# --- Best-model selection criterion ---
-# Options: "val_loss" (lower is better) or any metric where HIGHER is better:
-#   "token_acc", "sentence_acc", "strict_sentence_acc", "prefix_acc"
-BEST_MODEL_METRIC   = "val_loss"
-BEST_MODEL_MINIMIZE = True       # True → lower is better; False → higher is better
-
-# --- Device ---
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+# --- Transformer-specific ---
+NHEAD = 8              # number of attention heads (EMBEDDING_DIM must be divisible by NHEAD)
 
 # ============================================================
 # HELPERS
@@ -129,6 +110,37 @@ def initial_best_value(minimize: bool) -> float:
 
 
 # ============================================================
+# TRAINING & VALIDATION PARAMS
+# ============================================================
+
+# --- Training ---
+BATCH_SIZE           = 32
+NUM_EPOCHS           = 50
+LEARNING_RATE        = 1e-3
+CLIP_GRAD            = 1.0       # max gradient norm (0 → disabled)
+VALIDATE_AFTER_EPOCH = 1         # run validation every N epochs
+
+# --- LR scheduler (ReduceLROnPlateau) ---
+SCHEDULER_FACTOR   = 0.5
+SCHEDULER_PATIENCE = 3
+SCHEDULER_MIN_LR   = 1e-6
+
+# --- Validation / generation ---
+BEAM_WIDTH            = 3
+MAX_GEN_LEN           = 128
+COMPUTE_FUNCTIONAL    = True     # set False to skip sympy / numerical metrics
+BEAM_VALIDATE_EVERY   = 10       # run beam-search validation every N epochs (0 = never)
+
+# --- Best-model selection criterion ---
+# Options: "val_loss" (lower is better) or any metric where HIGHER is better:
+#   "token_acc", "sentence_acc", "strict_sentence_acc", "prefix_acc"
+BEST_MODEL_METRIC   = "val_loss"
+BEST_MODEL_MINIMIZE = True       # True → lower is better; False → higher is better
+
+# --- Device ---
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+# ============================================================
 # MAIN
 # ============================================================
 
@@ -138,6 +150,7 @@ def main() -> None:
     device = torch.device(DEVICE)
     print(f"\n{'='*65}")
     print(f"  Device : {device}")
+    print(f"  Model  : {MODEL_TYPE.upper()}")
     print(f"  Config : {NUM_EPOCHS} epochs, batch={BATCH_SIZE}, lr={LEARNING_RATE}")
     print(f"{'='*65}\n")
 
@@ -175,14 +188,28 @@ def main() -> None:
     # ------------------------------------------------------------------
     # 3. Build model
     # ------------------------------------------------------------------
-    model = Seq2SeqLSTM(
-        input_vocab_size  = tokenizer.input_vocab_size,
-        output_vocab_size = tokenizer.output_vocab_size,
-        embedding_dim     = EMBEDDING_DIM,
-        hidden_dim        = HIDDEN_DIM,
-        num_layers        = NUM_LAYERS,
-        dropout           = DROPOUT,
-    ).to(device)
+    if MODEL_TYPE == "transformer":
+        model = Seq2SeqTransformer(
+            input_vocab_size   = tokenizer.input_vocab_size,
+            output_vocab_size  = tokenizer.output_vocab_size,
+            d_model            = EMBEDDING_DIM,
+            nhead              = NHEAD,
+            num_encoder_layers = NUM_LAYERS,
+            num_decoder_layers = NUM_LAYERS,
+            dim_feedforward    = HIDDEN_DIM,
+            dropout            = DROPOUT,
+            src_pad_id         = tokenizer.input_tokenizer.pad_id,
+            tgt_pad_id         = tokenizer.output_tokenizer.pad_id,
+        ).to(device)
+    else:
+        model = Seq2SeqLSTM(
+            input_vocab_size  = tokenizer.input_vocab_size,
+            output_vocab_size = tokenizer.output_vocab_size,
+            embedding_dim     = EMBEDDING_DIM,
+            hidden_dim        = HIDDEN_DIM,
+            num_layers        = NUM_LAYERS,
+            dropout           = DROPOUT,
+        ).to(device)
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"[model] Trainable parameters : {n_params:,}\n")
@@ -215,7 +242,8 @@ def main() -> None:
         )
 
         elapsed = time.time() - t0
-        print(f"Epoch {epoch:>4d}/{NUM_EPOCHS}  |  train_loss={train_loss:.5f}  |  {elapsed:.1f}s", end="")
+        current_lr = optimizer.param_groups[0]["lr"]
+        print(f"Epoch {epoch:>4d}/{NUM_EPOCHS}  |  train_loss={train_loss:.5f}  |  lr={current_lr:.2e}  |  {elapsed:.1f}s", end="")
 
         # --- Validate every VALIDATE_AFTER_EPOCH epochs ---
         if epoch % VALIDATE_AFTER_EPOCH == 0:
@@ -251,12 +279,14 @@ def main() -> None:
                         "val_metrics":      val_metrics,
                         "train_loss":       train_loss,
                         "config": {
+                            "model_type":        MODEL_TYPE,
                             "input_vocab_size":  tokenizer.input_vocab_size,
                             "output_vocab_size": tokenizer.output_vocab_size,
                             "embedding_dim":     EMBEDDING_DIM,
                             "hidden_dim":        HIDDEN_DIM,
                             "num_layers":        NUM_LAYERS,
                             "dropout":           DROPOUT,
+                            "nhead":             NHEAD,
                         },
                     },
                     BEST_MODEL_PATH,
@@ -297,16 +327,29 @@ def load_best_model(checkpoint_path: str, device: Optional[str] = None) -> Seq2S
         device = "cuda" if torch.cuda.is_available() else "cpu"
     ckpt = torch.load(checkpoint_path, map_location=device)
     cfg  = ckpt["config"]
-    model = Seq2SeqLSTM(
-        input_vocab_size  = cfg["input_vocab_size"],
-        output_vocab_size = cfg["output_vocab_size"],
-        embedding_dim     = cfg["embedding_dim"],
-        hidden_dim        = cfg["hidden_dim"],
-        num_layers        = cfg["num_layers"],
-        dropout           = cfg["dropout"],
-    ).to(device)
+    model_type = cfg.get("model_type", "lstm")
+    if model_type == "transformer":
+        model = Seq2SeqTransformer(
+            input_vocab_size   = cfg["input_vocab_size"],
+            output_vocab_size  = cfg["output_vocab_size"],
+            d_model            = cfg["embedding_dim"],
+            nhead              = cfg.get("nhead", 8),
+            num_encoder_layers = cfg["num_layers"],
+            num_decoder_layers = cfg["num_layers"],
+            dim_feedforward    = cfg["hidden_dim"],
+            dropout            = cfg["dropout"],
+        ).to(device)
+    else:
+        model = Seq2SeqLSTM(
+            input_vocab_size  = cfg["input_vocab_size"],
+            output_vocab_size = cfg["output_vocab_size"],
+            embedding_dim     = cfg["embedding_dim"],
+            hidden_dim        = cfg["hidden_dim"],
+            num_layers        = cfg["num_layers"],
+            dropout           = cfg["dropout"],
+        ).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
-    print(f"[load] Loaded epoch {ckpt['epoch']} | "
+    print(f"[load] Loaded {model_type.upper()} epoch {ckpt['epoch']} | "
           f"val_loss={ckpt['val_metrics']['val_loss']:.5f}")
     return model
 

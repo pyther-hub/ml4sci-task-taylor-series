@@ -177,10 +177,11 @@ class Seq2SeqLSTM(nn.Module):
             ids: List[int] = []
             for tid in outputs[i].tolist():
                 if tid == eos_id:
+                    ids.append(tid)   # include EOS for strict_sentence_accuracy
                     break
                 if tid != pad_id:
                     ids.append(tid)
-            results.append((ids, out_tok.decode(ids)))
+            results.append((ids, out_tok.decode([t for t in ids if t != eos_id])))
         return results
 
     # -----------------------------------------------------------------------
@@ -238,11 +239,12 @@ class Seq2SeqLSTM(nn.Module):
             logits, hidden, cell = self.decoder(token, hidden, cell)
             next_id = logits.argmax(dim=-1).item()
             if next_id == eos_id:
+                generated.append(next_id)   # include EOS for strict_sentence_accuracy
                 break
             generated.append(next_id)
             token = torch.tensor([next_id], device=device)
 
-        decoded = tokenizer.decode(generated)
+        decoded = tokenizer.decode([t for t in generated if t != eos_id])
         return generated, decoded
 
     # -----------------------------------------------------------------------
@@ -283,7 +285,7 @@ class Seq2SeqLSTM(nn.Module):
             for neg_score, ids, h, c in beam:
                 last_id = ids[-1]
                 if last_id == eos_id:
-                    completed.append((neg_score, ids[:-1]))  # drop <EOS> from output
+                    completed.append((neg_score, ids))  # keep <EOS> for strict_sentence_accuracy
                     continue
 
                 token = torch.tensor([last_id], device=device)
@@ -304,18 +306,14 @@ class Seq2SeqLSTM(nn.Module):
 
         # Collect any unfinished hypotheses
         for neg_score, ids, _, _ in beam:
-            last = ids[-1] if ids else eos_id
-            if last == eos_id:
-                completed.append((neg_score, ids[:-1]))
-            else:
-                completed.append((neg_score, ids))
+            completed.append((neg_score, ids))
 
         if not completed:
             completed = [(neg_score, ids) for neg_score, ids, _, _ in beam]
 
         # Best hypothesis = lowest neg log prob (highest log prob)
         _, best_ids = min(completed, key=lambda x: x[0])
-        decoded = tokenizer.decode(best_ids)
+        decoded = tokenizer.decode([t for t in best_ids if t != eos_id])
         return best_ids, decoded
 
 

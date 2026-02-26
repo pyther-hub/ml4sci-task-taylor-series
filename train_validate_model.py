@@ -22,6 +22,7 @@ import sympy as sp
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 # ---------------------------------------------------------------------------
 # metric.py imports
@@ -256,6 +257,12 @@ def validate(
     pred_strings: List[str] = []
     tgt_strings:  List[str] = []
 
+    # Count total samples for beam search progress bar
+    if use_beam:
+        total_val_samples = sum(src.shape[0] for src, *_ in val_loader)
+        print(f"[Beam Search] Starting beam decoding: {total_val_samples} samples, beam_width={beam_width}, max_gen_len={max_gen_len}")
+        beam_pbar = tqdm(total=total_val_samples, desc=f"Beam decode (w={beam_width})", unit="sample", dynamic_ncols=True)
+
     with torch.no_grad():
         for src, tgt, _src_lens, _tgt_lens in val_loader:
             src = src.to(device)
@@ -273,6 +280,7 @@ def validate(
                         beam_width=beam_width,
                     )
                     batch_preds.append((pred_ids, pred_str))
+                    beam_pbar.update(1)
             else:
                 # Batched greedy decoding (fast; one encoder call per batch)
                 batch_preds = model.generate_batch(src, tokenizer, max_len=max_gen_len)
@@ -285,6 +293,7 @@ def validate(
                 tgt_ids_clean = []
                 for tid in tgt_seq:
                     if tid == eos_id:
+                        tgt_ids_clean.append(tid)   # include EOS for strict_sentence_accuracy
                         break
                     if tid != pad_id:
                         tgt_ids_clean.append(tid)
@@ -292,9 +301,13 @@ def validate(
                 all_pred_ids.append(pred_ids)
                 all_tgt_ids.append(tgt_ids_clean)
 
-                tgt_str = out_tok.decode(tgt_ids_clean)
+                tgt_str = out_tok.decode([t for t in tgt_ids_clean if t != eos_id])
                 pred_strings.append(pred_str)
                 tgt_strings.append(tgt_str)
+
+    if use_beam:
+        beam_pbar.close()
+        print(f"[Beam Search] Decoding complete. {total_val_samples} samples decoded.")
 
     # ------------------------------------------------------------------
     # Pad pred / tgt lists to tensors for metric functions
