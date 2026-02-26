@@ -1,6 +1,7 @@
 import json
 import os
 import pickle
+import re
 from collections import Counter
 from typing import Dict, List, Tuple
 
@@ -149,15 +150,131 @@ class WordLevelBPETokenizer:
 
 
 # ---------------------------------------------------------------------------
-# Dual BPE Tokenizer — one tokenizer per side (input / output)
+# Symbol-Level Tokenizer — no BPE, one vocab entry per space-separated symbol
+# ---------------------------------------------------------------------------
+
+class SymbolTokenizer:
+    """
+    Vocabulary tokenizer for symbolic math prefix expressions.
+    - String symbols (e.g. 'mul', 'pow', 'x') are kept as single tokens.
+    - Integer literals (e.g. '-42', '3') are split digit-by-digit so the
+      model predicts one character per step for numbers.
+    Special tokens (PAD, SOS, EOS, UNK) are reserved at IDs 0-3.
+    """
+
+    _INT_RE = re.compile(r'^-?\d+$')
+
+    def __init__(self):
+        self.vocab: Dict[str, int] = {}
+        self.inv_vocab: Dict[int, str] = {}
+
+    @property
+    def pad_id(self) -> int:
+        return self.vocab[PAD]
+
+    @property
+    def sos_id(self) -> int:
+        return self.vocab[SOS]
+
+    @property
+    def eos_id(self) -> int:
+        return self.vocab[EOS]
+
+    @property
+    def unk_id(self) -> int:
+        return self.vocab[UNK]
+
+    @classmethod
+    def _expand(cls, token: str) -> List[str]:
+        """Split an integer token into individual characters; others unchanged.
+
+        Examples:
+            '123'  -> ['1', '2', '3']
+            '-42'  -> ['-', '4', '2']
+            'mul'  -> ['mul']
+            'x'    -> ['x']
+        """
+        if cls._INT_RE.match(token):
+            return list(token)
+        return [token]
+
+    @staticmethod
+    def _join_tokens(tokens: List[str]) -> str:
+        """Reconstruct integer strings from digit-level token sequences."""
+        result = []
+        i = 0
+        while i < len(tokens):
+            # Negative integer: '-' immediately followed by one or more digits
+            if tokens[i] == '-' and i + 1 < len(tokens) and tokens[i + 1].isdigit():
+                num = '-'
+                i += 1
+                while i < len(tokens) and tokens[i].isdigit():
+                    num += tokens[i]
+                    i += 1
+                result.append(num)
+            # Positive integer: one or more consecutive digit characters
+            elif tokens[i].isdigit():
+                num = ''
+                while i < len(tokens) and tokens[i].isdigit():
+                    num += tokens[i]
+                    i += 1
+                result.append(num)
+            else:
+                result.append(tokens[i])
+                i += 1
+        return ' '.join(result)
+
+    def fit(self, sequences: List[str]):
+        vocab_set: set = set()
+        for seq in sequences:
+            for token in seq.split():
+                vocab_set.update(self._expand(token))
+        # IDs 0-3 reserved for special tokens
+        self.vocab = {tok: idx for idx, tok in enumerate(SPECIAL_TOKENS)}
+        for tok in sorted(vocab_set):
+            if tok not in self.vocab:
+                self.vocab[tok] = len(self.vocab)
+        self.inv_vocab = {v: k for k, v in self.vocab.items()}
+
+    def encode(self, sequence: str) -> List[int]:
+        expanded: List[str] = []
+        for token in sequence.split():
+            expanded.extend(self._expand(token))
+        return [self.vocab.get(t, self.vocab[UNK]) for t in expanded]
+
+    def decode(self, ids: List[int]) -> str:
+        skip = {self.pad_id, self.sos_id, self.eos_id}
+        tokens = [self.inv_vocab.get(i, UNK) for i in ids if i not in skip]
+        return self._join_tokens(tokens)
+
+    def __len__(self) -> int:
+        return len(self.vocab)
+
+    def save(self, path: str):
+        with open(path, "wb") as f:
+            pickle.dump({"vocab": self.vocab}, f)
+
+    def load(self, path: str):
+        with open(path, "rb") as f:
+            data = pickle.load(f)
+        self.vocab = data["vocab"]
+        self.inv_vocab = {v: k for k, v in self.vocab.items()}
+
+
+# ---------------------------------------------------------------------------
+# Dual Tokenizer — BPE for input, symbol-level for output
 # ---------------------------------------------------------------------------
 
 class DualBPETokenizer:
-    """Wraps two independent WordLevelBPETokenizers, one per modality."""
+    """
+    Input side  : WordLevelBPETokenizer (BPE over function_prefix tokens).
+    Output side : SymbolTokenizer       (one vocab entry per math symbol,
+                                         no merges — token-wise prediction).
+    """
 
     def __init__(self, num_merges: int = 200):
         self.input_tokenizer  = WordLevelBPETokenizer(num_merges)
-        self.output_tokenizer = WordLevelBPETokenizer(num_merges)
+        self.output_tokenizer = SymbolTokenizer()
 
     # -- Fit both sides from a JSON file --
     def fit(self, json_path: str):
@@ -195,10 +312,9 @@ class DualBPETokenizer:
         with open(path, "wb") as f:
             pickle.dump(
                 {
-                    "input_merges":  self.input_tokenizer.merges,
-                    "input_vocab":   self.input_tokenizer.vocab,
-                    "output_merges": self.output_tokenizer.merges,
-                    "output_vocab":  self.output_tokenizer.vocab,
+                    "input_merges": self.input_tokenizer.merges,
+                    "input_vocab":  self.input_tokenizer.vocab,
+                    "output_vocab": self.output_tokenizer.vocab,
                 },
                 f,
             )
@@ -206,10 +322,9 @@ class DualBPETokenizer:
     def load(self, path: str):
         with open(path, "rb") as f:
             data = pickle.load(f)
-        self.input_tokenizer.merges   = data["input_merges"]
-        self.input_tokenizer.vocab    = data["input_vocab"]
+        self.input_tokenizer.merges    = data["input_merges"]
+        self.input_tokenizer.vocab     = data["input_vocab"]
         self.input_tokenizer.inv_vocab = {v: k for k, v in data["input_vocab"].items()}
-        self.output_tokenizer.merges   = data["output_merges"]
         self.output_tokenizer.vocab    = data["output_vocab"]
         self.output_tokenizer.inv_vocab = {v: k for k, v in data["output_vocab"].items()}
 
