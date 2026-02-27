@@ -125,6 +125,9 @@ SCHEDULER_FACTOR   = 0.5
 SCHEDULER_PATIENCE = 3
 SCHEDULER_MIN_LR   = 1e-6
 
+# --- Epoch-based cosine LR decay ---
+LR_COSINE_DECAY = True   # set False to disable cosine annealing
+
 # --- Validation / generation ---
 BEAM_WIDTH            = 3
 MAX_GEN_LEN           = 128
@@ -226,6 +229,12 @@ def main() -> None:
         patience = SCHEDULER_PATIENCE,
         min_lr   = SCHEDULER_MIN_LR,
     )
+    cosine_scheduler = (
+        torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=NUM_EPOCHS, eta_min=SCHEDULER_MIN_LR
+        )
+        if LR_COSINE_DECAY else None
+    )
 
     # ------------------------------------------------------------------
     # 5. Training loop
@@ -276,6 +285,7 @@ def main() -> None:
                         "model_state_dict": model.state_dict(),
                         "optimizer_state":  optimizer.state_dict(),
                         "scheduler_state":  scheduler.state_dict(),
+                        "cosine_scheduler_state": cosine_scheduler.state_dict() if cosine_scheduler else None,
                         "val_metrics":      val_metrics,
                         "train_loss":       train_loss,
                         "config": {
@@ -300,6 +310,10 @@ def main() -> None:
             history.append({"epoch": epoch, "train_loss": train_loss, **val_metrics})
         else:
             print()   # close the train-only line
+
+        # --- Cosine LR decay (every epoch) ---
+        if cosine_scheduler is not None:
+            cosine_scheduler.step()
 
     # ------------------------------------------------------------------
     # 6. Final summary
