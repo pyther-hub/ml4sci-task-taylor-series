@@ -430,3 +430,5 @@ def print_metrics(
             f"{val_metrics['n_functional_ok']} / {val_metrics['n_functional_failed']}"
         )
     print(sep)
+
+    # Reconstruct string
