@@ -96,37 +96,114 @@ def taylor_to_coeffs(taylor_str: str, max_order: int = MAX_ORDER) -> List[float]
 
 
 # ---------------------------------------------------------------------------
-# CoeffNormaliser — per-coefficient z-score
+# Signed log helpers  (parameter-free, used for coeff3 and coeff4)
 # ---------------------------------------------------------------------------
+
+def _signed_log(x: torch.Tensor) -> torch.Tensor:
+    """Signed log transform: sign(x) * ln(1 + |x|).
+
+    Works for all real values including negatives and zero.
+    Compresses large magnitudes while preserving the sign.
+    """
+    return x.sign() * (x.abs() + 1.0).log()
+
+
+def _signed_exp(z: torch.Tensor) -> torch.Tensor:
+    """Inverse of _signed_log: sign(z) * (exp(|z|) - 1)."""
+    return z.sign() * (z.abs().exp() - 1.0)
+
+
+# ---------------------------------------------------------------------------
+# CoeffNormaliser — hybrid: z-score for coeff0-2, signed log for coeff3-4
+# ---------------------------------------------------------------------------
+
+# Which coefficient indices get which treatment
+_ZSCORE_SLICE = slice(0, 3)   # coeff0, coeff1, coeff2  → z-score
+_LOG_SLICE    = slice(3, 5)   # coeff3, coeff4           → signed log transform
+
 
 class CoeffNormaliser:
     """
-    Fits per-coefficient mean and standard deviation from training data.
-    Used to normalise targets before training and de-normalise at inference.
+    Hybrid normaliser for the 5 Taylor derivative coefficients.
+
+    coeff0 .. coeff2  (indices 0-2) : per-coefficient z-score
+        normalised = (x - mean_k) / std_k   for k in {0, 1, 2}
+
+    coeff3, coeff4   (indices 3-4) : signed log transform
+        normalised = sign(x) * ln(1 + |x|)
+        inverse    = sign(z) * (exp(|z|) - 1)
+
+    The signed log is used for coeff3/coeff4 because their standard
+    deviations are enormous (~7 000 and ~105 000 respectively), making
+    plain z-score unstable.  The log transform compresses the scale
+    while still preserving the sign of the derivative.
 
     Attributes
     ----------
-    mean : Tensor of shape (NUM_COEFFS,)
-    std  : Tensor of shape (NUM_COEFFS,)  — clamped to 1e-6 to avoid /0
+    mean : Tensor of shape (3,)  — means  for coeff0..coeff2
+    std  : Tensor of shape (3,)  — stdevs for coeff0..coeff2, clamped ≥ 1e-6
     """
 
     def __init__(self):
-        self.mean: Optional[torch.Tensor] = None
-        self.std:  Optional[torch.Tensor] = None
+        self.mean: Optional[torch.Tensor] = None   # (3,)
+        self.std:  Optional[torch.Tensor] = None   # (3,)
 
     def fit(self, coeffs: List[List[int]]) -> None:
-        """Compute mean and std from a list of coefficient rows."""
-        t         = torch.tensor(coeffs, dtype=torch.float32)   # (N, NUM_COEFFS)
-        self.mean = t.mean(dim=0)
-        self.std  = t.std(dim=0).clamp(min=1e-6)
+        """Compute z-score stats from training coefficient rows.
+
+        Only coeff0..coeff2 require fitting; the log transform is
+        parameter-free, so coeff3/coeff4 need no statistics.
+
+        Parameters
+        ----------
+        coeffs : list of N rows, each row is [c0, c1, c2, c3, c4]
+        """
+        t         = torch.tensor(coeffs, dtype=torch.float32)   # (N, 5)
+        zscore    = t[:, _ZSCORE_SLICE]                          # (N, 3)
+        self.mean = zscore.mean(dim=0)                           # (3,)
+        self.std  = zscore.std(dim=0).clamp(min=1e-6)           # (3,)
 
     def normalise(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward transform: (x - mean) / std."""
-        return (x - self.mean.to(x.device)) / self.std.to(x.device)
+        """Apply the hybrid forward transform.
 
-    def denormalise(self, x: torch.Tensor) -> torch.Tensor:
-        """Inverse transform: x * std + mean."""
-        return x * self.std.to(x.device) + self.mean.to(x.device)
+        Parameters
+        ----------
+        x : Tensor of shape (5,) or (B, 5) — raw rounded integer coefficients
+
+        Returns
+        -------
+        Tensor same shape as x — normalised coefficients
+        """
+        out = x.clone().float()
+        # Z-score: coeff0, coeff1, coeff2
+        out[..., _ZSCORE_SLICE] = (
+            (x[..., _ZSCORE_SLICE] - self.mean.to(x.device))
+            / self.std.to(x.device)
+        )
+        # Signed log: coeff3, coeff4
+        out[..., _LOG_SLICE] = _signed_log(x[..., _LOG_SLICE].float())
+        return out
+
+    def denormalise(self, z: torch.Tensor) -> torch.Tensor:
+        """Apply the hybrid inverse transform.
+
+        Parameters
+        ----------
+        z : Tensor of shape (5,) or (B, 5) — normalised coefficients
+
+        Returns
+        -------
+        Tensor same shape as z — recovered original-scale coefficients
+        """
+        out = z.clone().float()
+        # Inverse z-score: coeff0, coeff1, coeff2
+        out[..., _ZSCORE_SLICE] = (
+            z[..., _ZSCORE_SLICE] * self.std.to(z.device)
+            + self.mean.to(z.device)
+        )
+        # Inverse signed log: coeff3, coeff4
+        out[..., _LOG_SLICE] = _signed_exp(z[..., _LOG_SLICE])
+        return out
 
     def save(self, path: str) -> None:
         with open(path, "wb") as f:

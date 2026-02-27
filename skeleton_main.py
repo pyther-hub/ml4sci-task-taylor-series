@@ -165,6 +165,10 @@ def main() -> None:
 
     # ------------------------------------------------------------------
     # 2. Normaliser (fit ONLY on the training split — no data leakage)
+    #
+    # Hybrid scheme:
+    #   coeff0-2 → per-coefficient z-score  (mean/std fitted here)
+    #   coeff3-4 → signed log transform     (parameter-free, no fitting needed)
     # ------------------------------------------------------------------
     normaliser = CoeffNormaliser()
 
@@ -172,16 +176,17 @@ def main() -> None:
         print(f"[normaliser] Loading from '{NORMALISER_SAVE_PATH}' ...")
         normaliser.load(NORMALISER_SAVE_PATH)
     else:
-        # Load raw coefficients without normalisation to compute stats
-        temp_ds    = CoeffDataset(DATASET_JSON_PATH, tokenizer, normaliser=None)
+        # Load raw coefficients without normalisation to compute z-score stats
+        temp_ds      = CoeffDataset(DATASET_JSON_PATH, tokenizer, normaliser=None)
         train_idx, _ = split_indices(len(temp_ds), VAL_RATIO, RANDOM_SEED)
         train_coeffs = [temp_ds.coeffs[i] for i in train_idx]
         normaliser.fit(train_coeffs)
         normaliser.save(NORMALISER_SAVE_PATH)
         del temp_ds
         print(f"[normaliser] Fitted on {len(train_coeffs)} training samples")
-        print(f"[normaliser] Mean : {normaliser.mean.tolist()}")
-        print(f"[normaliser] Std  : {normaliser.std.tolist()}\n")
+        print(f"[normaliser] coeff0-2 z-score mean : {normaliser.mean.tolist()}")
+        print(f"[normaliser] coeff0-2 z-score std  : {normaliser.std.tolist()}")
+        print(f"[normaliser] coeff3-4               : signed log  sign(x)*ln(1+|x|)\n")
 
     # ------------------------------------------------------------------
     # 3. Dataset and dataloaders
@@ -371,10 +376,12 @@ def load_best_model(
 
     model.load_state_dict(ckpt["model_state_dict"])
 
-    # Reconstruct normaliser from checkpoint
+    # Reconstruct normaliser from checkpoint.
+    # mean/std are shape (3,) — z-score stats for coeff0-2 only.
+    # coeff3-4 use the parameter-free signed log; no extra state needed.
     norm = CoeffNormaliser()
-    norm.mean = ckpt.get("normaliser_mean")
-    norm.std  = ckpt.get("normaliser_std")
+    norm.mean = ckpt.get("normaliser_mean")   # (3,) or None
+    norm.std  = ckpt.get("normaliser_std")    # (3,) or None
 
     print(
         f"[load] Loaded epoch {ckpt['epoch']}  |  "

@@ -213,8 +213,11 @@ def validate(
     val_loader     : validation DataLoader — yields (src, coeffs, src_lens)
     criterion      : WeightedMSELoss
     device         : evaluation device
-    normaliser     : CoeffNormaliser to invert z-score before metric computation
-                     (pass None if training without normalisation)
+    normaliser     : CoeffNormaliser to invert the hybrid normalisation before
+                     metric computation.
+                     coeff0-2 → inverse z-score  (x * std + mean)
+                     coeff3-4 → inverse signed log  sign(z) * (exp(|z|) - 1)
+                     Pass None if training without normalisation.
     coeff_weights  : (NUM_COEFFS,) tensor for MSE weighting in metrics
                      (independent of training weights — for reporting only)
     tolerance      : accuracy threshold; default 0.5 → must round to correct int
@@ -222,9 +225,9 @@ def validate(
     Returns
     -------
     dict with keys:
-        'val_loss'         — normalised-space weighted MSE
-        'overall_mse'      — de-normalised MSE (weighted)
-        'overall_mae'      — de-normalised MAE
+        'val_loss'         — weighted MSE in hybrid-normalised space
+        'overall_mse'      — de-normalised MSE in original integer space (weighted)
+        'overall_mae'      — de-normalised MAE in original integer space
         'overall_acc'      — fraction of (sample, position) pairs correct
         'exact_match_acc'  — fraction of samples where ALL 5 coefficients correct
         'coeff{k}_mse'     — per-position MSE for k in 0..4
