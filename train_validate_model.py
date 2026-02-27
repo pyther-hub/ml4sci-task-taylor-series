@@ -134,7 +134,7 @@ def train_epoch(
     total_loss = 0.0
     total_samples = 0
 
-    for batch_idx, (src, tgt, src_lens, tgt_lens) in tqdm(enumerate(loader)):
+    for batch_idx, (src, tgt, src_lens, tgt_lens) in enumerate(loader):
         src = src.to(device)
         tgt = tgt.to(device)
 
